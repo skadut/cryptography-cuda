@@ -1,0 +1,21 @@
+build/
+out/
+*.o
+*.obj
+*.exe
+*.lib
+*.a
+
+# Benchmark and telemetry artifacts. baseline_results.csv is the phase 1 exit
+# artifact and must be committed deliberately, not swept up by a wildcard.
+telemetry_*.csv
+gpuseal_test_vectors.rsp
+*.nsys-rep
+*.ncu-rep
+*.qdrep
+
+tests/vectors/*.rsp
+
+__pycache__/
+*.pyc
+.venv/
