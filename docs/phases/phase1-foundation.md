@@ -24,12 +24,19 @@ cryptography-cuda/
 │   ├── cpu_baseline.c     # OpenSSL EVP multi-threaded harness
 │   └── test_vectors.c     # NIST CAVP parser
 ├── tests/
-│   ├── test_cpu_baseline.c
+│   ├── test_cpu_baseline.c    # G2 oracle, CAVP vectors (P1.8, P1.9)
+│   ├── test_telemetry.c       # P1.3, P1.4 -- needs NVML
+│   ├── test_openssl_cli.c     # P1.6 -- external openssl CLI oracle
+│   ├── test_thread_scaling.c  # P1.7 -- 8-thread >= 4x 1-thread
+│   ├── nvtx_probe.c           # P1.5 -- emits ranges for nsys to capture
 │   └── vectors/           # NIST CAVP .rsp files
 ├── bench/
 │   └── bench_cpu.c        # CPU baseline benchmark entry point
 ├── python/
-│   └── telemetry.py       # pynvml sampler (reference)
+│   └── telemetry.py       # pynvml sampler (independent cross-check)
+├── scripts/
+│   ├── check_prereqs.{sh,ps1}   # P1.1
+│   └── verify_nvtx.{sh,ps1}     # P1.5 driver: nsys profile + trace grep
 └── docs/phases/
 ```
 
@@ -58,7 +65,10 @@ NVTX range helpers: `gpuseal_nvtx_push(name)` / `gpuseal_nvtx_pop()` for phase a
 - Records: cores used, whether VAES path active (via `openssl speed` output)
 - Reports throughput in GB/s labeled **end-to-end**
 
-Payload sizes: 1 KB to 8 GB sweep (same as §7 matrix).
+Payload sizes: `bench_cpu` sweeps 1 KiB to 256 MiB. The §7 matrix extends to 8 GB;
+those sizes are deferred to phase 6, where the GPU-side allocator and the VRAM
+budget model decide how a payload larger than device memory is chunked. Running
+them now would measure host paging, not AES.
 
 ## NIST CAVP vector loader
 
@@ -92,19 +102,30 @@ CPU-side gates. P1.3–P1.5 remain unverified until the suite runs on GPU hardwa
 
 ## Phase Gate — Verification before Phase 2
 
-Run `ctest -L phase1` (or `make verify-phase1`). All must pass:
+Run `cmake --build build --target verify-phase1` (or `ctest -L phase1
+--output-on-failure`). All must pass:
 
-| # | Test | Verifies |
-|---|---|---|
-| P1.1 | `check_prereqs` exits 0 | Toolchain present (CUDA, OpenSSL, CMake, compiler) |
-| P1.2 | Build produces `bench_cpu` and `libgpuseal_telemetry` with zero warnings | CMake wiring correct |
-| P1.3 | Telemetry sampler runs 5 s, emits ≥ 45 CSV rows at 10 Hz | NVML polling works at target rate |
-| P1.4 | Telemetry CSV has all 10 required columns, no NaN in `power_w`/`mem_used` | Metric collection complete |
-| P1.5 | NVTX range push/pop appears in `nsys` trace | Timeline annotation works |
-| P1.6 | CPU baseline encrypts 1 GB, output matches OpenSSL `enc` CLI byte-for-byte | Harness is a correct oracle |
-| P1.7 | CPU baseline scales: 8-thread throughput ≥ 4× 1-thread | Multi-threading actually parallel |
-| P1.8 | CAVP loader parses reference `.rsp`, vector count matches file header | Vector loader correct |
-| P1.9 | Every CAVP vector passes through OpenSSL EVP | Loader + reference agree |
-| P1.10 | Baseline results CSV written with cores, clock, VAES-active flag | Exit condition artifact exists |
+| # | Test | Runner | Verifies |
+|---|---|---|---|
+| P1.1 | `check_prereqs` exits 0 | ctest `prereqs` | Toolchain present (CUDA, OpenSSL, CMake, compiler) |
+| P1.2 | Build produces `bench_cpu` and `gpuseal_core` with zero warnings | build (`/WX`, `-Werror`) | CMake wiring correct |
+| P1.3 | Telemetry sampler runs 5 s, emits ≥ 45 CSV rows at 10 Hz | ctest `telemetry` | NVML polling works at target rate |
+| P1.4 | Telemetry CSV has all 10 columns; `power_w` not all-zero, `mem_total` present | ctest `telemetry` | Metrics are real readings, not a stub |
+| P1.5 | Three NVTX ranges appear in an `nsys` trace | ctest `nvtx_trace` | Timeline annotation works |
+| P1.6 | Harness output matches the external `openssl enc` CLI byte-for-byte | ctest `openssl_cli_oracle` | Independent implementations agree |
+| P1.7 | 8-thread throughput ≥ 4× 1-thread | ctest `thread_scaling` | Multi-threading actually parallel |
+| P1.8 | CAVP loader parses reference `.rsp`, retained vector count correct | ctest `cpu_baseline` | Vector loader correct |
+| P1.9 | Every CAVP vector passes through OpenSSL EVP | ctest `cpu_baseline` | Loader + reference agree |
+| P1.10 | Baseline results CSV written with cores, VAES flag, throughput label | `bench_cpu` | Exit condition artifact exists |
 
-**Exit gate:** P1.1–P1.10 green AND `baseline_results.csv` committed. Do not start Phase 2 otherwise.
+P1.3, P1.4, and P1.5 require an NVIDIA GPU; P1.5 additionally requires Nsight
+Systems. They exit 77 (CTest *skipped*) elsewhere. **A skip is not a pass** — see
+[phase1-gpu-verification.md](phase1-gpu-verification.md) for how to run these on
+CUDA hardware and how to confirm the build is not reading stubbed telemetry.
+
+P1.6 defaults to a 64 MiB payload for speed; set `GPUSEAL_P16_BYTES=1073741824`
+for the 1 GiB run this table specifies. P1.7 skips on hosts with fewer than 8
+cores.
+
+**Exit gate:** P1.1–P1.10 **passed** (not skipped) AND `baseline_results.csv`
+committed. Do not start Phase 2 otherwise.
